@@ -1,0 +1,11 @@
+services:
+  chatbot:
+    build: .
+    container_name: chatbot-erp
+    restart: always
+    ports:
+      - "2206:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./app/context:/app/app/context
