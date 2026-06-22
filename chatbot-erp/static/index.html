@@ -121,13 +121,13 @@
 <body>
   <div class="chat-container">
     <div class="chat-header">
-      Asisten ERP Hasta — Modul HRD
+      Hato — Asisten ERP Hasta
       <span>Tanya saya tentang menu dan fitur yang tersedia</span>
     </div>
 
     <div class="chat-messages" id="messages">
       <div class="message assistant">
-        Halo! Saya asisten ERP Hasta untuk modul HRD. Saya bisa membantu kamu menemukan menu yang tepat. Apa yang ingin kamu lakukan?
+        Halo! Saya Hato, asisten ERP Hasta. Saya siap membantu kamu menggunakan sistem ERP. Apa yang bisa saya bantu?
       </div>
     </div>
 
@@ -173,7 +173,8 @@
       appendMessage("user", text);
       history.push({ role: "user", content: text });
 
-      const typingEl = appendMessage("assistant typing", "Sedang mengetik...");
+      const replyEl = appendMessage("assistant typing", "Sedang mengetik...");
+      let fullReply = "";
 
       try {
         const res = await fetch("/api/chat", {
@@ -183,18 +184,27 @@
         });
 
         if (!res.ok) {
-          const err = await res.json();
-          throw new Error(err.detail || "Terjadi kesalahan");
+          throw new Error("Terjadi kesalahan pada server");
         }
 
-        const data = await res.json();
-        typingEl.remove();
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        replyEl.className = "message assistant";
+        replyEl.textContent = "";
 
-        appendMessage("assistant", data.reply);
-        history.push({ role: "assistant", content: data.reply });
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const token = decoder.decode(value, { stream: true });
+          fullReply += token;
+          replyEl.textContent = fullReply;
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
+
+        history.push({ role: "assistant", content: fullReply });
       } catch (err) {
-        typingEl.remove();
-        appendMessage("assistant", `Maaf, terjadi kesalahan: ${err.message}`);
+        replyEl.className = "message assistant";
+        replyEl.textContent = `Maaf, terjadi kesalahan: ${err.message}`;
       } finally {
         sendBtn.disabled = false;
         inputEl.focus();
