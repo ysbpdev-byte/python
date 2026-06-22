@@ -1,6 +1,7 @@
 # Skema Database ERP Hasta (Modul HRD)
 
 > File ini mendeskripsikan skema tabel PostgreSQL yang boleh di-query oleh chatbot (SELECT only).
+> PENTING: Gunakan nama tabel persis seperti yang tertulis (contoh: `employees`, bukan `karyawan`).
 > Konvensi penamaan kolom: `c_` = string/varchar, `d_` = date/datetime, `n_` = numeric/FK, `l_` = boolean.
 
 ---
