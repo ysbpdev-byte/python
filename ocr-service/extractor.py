@@ -1,12 +1,35 @@
+import threading
+import os
 from paddleocr import PaddleOCRVL
 
+IDLE_TIMEOUT = int(os.getenv("MODEL_IDLE_TIMEOUT", "300"))  # detik, default 5 menit
+
 _pipeline = None
+_lock = threading.Lock()
+_timer: threading.Timer | None = None
+
+
+def _unload():
+    global _pipeline
+    with _lock:
+        _pipeline = None
+
+
+def _reset_timer():
+    global _timer
+    if _timer is not None:
+        _timer.cancel()
+    _timer = threading.Timer(IDLE_TIMEOUT, _unload)
+    _timer.daemon = True
+    _timer.start()
 
 
 def _get_pipeline():
     global _pipeline
-    if _pipeline is None:
-        _pipeline = PaddleOCRVL()
+    with _lock:
+        if _pipeline is None:
+            _pipeline = PaddleOCRVL()
+    _reset_timer()
     return _pipeline
 
 
