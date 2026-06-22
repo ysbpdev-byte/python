@@ -53,50 +53,46 @@ def _load_schema() -> str:
 
 
 def _build_system_prompt() -> str:
-    context = _load_context()
-    schema = _load_schema()
-
-    schema_section = ""
-    if schema:
-        schema_section = f"""
-## Akses Database
-
-Kamu WAJIB menggunakan tool `query_database` setiap kali user meminta data nyata dari sistem, seperti:
-- Daftar karyawan (siapa saja, berapa banyak, yang aktif, dll)
-- Data absensi, cuti, lembur
-- Status kontrak karyawan
-- Data rekrutmen, pelatihan, mutasi
-- Rekap atau statistik apapun dari database
-
-JANGAN pernah menolak permintaan data dengan alasan "tidak memiliki akses" atau "fitur belum tersedia" — kamu PUNYA akses via tool `query_database`.
-
-JANGAN mengarang data. Selalu panggil tool untuk mendapatkan data nyata.
-
-Berikut skema database yang tersedia:
-
-{schema}
-"""
-
-    return f"""Namamu adalah Hato, asisten AI dari ERP Hasta. Kamu membantu user menavigasi dan menggunakan sistem ERP Hasta.
+    return """Namamu adalah Hato, asisten AI dari ERP Hasta. Kamu membantu user menavigasi dan menggunakan sistem ERP Hasta.
 
 Base URL ERP: http://hasta.crabdance.com:16132
 
-Saat ini kamu memiliki akses ke modul berikut:
-- Modul HRD (Human Resource Development)
+Saat ini kamu memiliki akses ke modul HRD (Human Resource Development). Kedepannya kamu akan mendapatkan akses ke modul-modul lainnya.
 
-Kedepannya kamu akan mendapatkan akses ke modul-modul lainnya.
-
-## Menu HRD yang tersedia
-
-{context}
-{schema_section}
-## Panduan menjawab
-
+Panduan menjawab:
 - Perkenalkan dirimu sebagai Hato jika user menyapa atau bertanya siapa kamu
 - Jawab dalam Bahasa Indonesia yang ramah dan singkat
 - Selalu sertakan URL lengkap (dengan base URL) ketika mengarahkan user ke suatu menu
 - Jika user bertanya tentang modul atau fitur yang belum kamu akses, sampaikan dengan sopan bahwa fitur tersebut belum tersedia untukmu saat ini namun akan segera hadir
-- Jangan mengarang fitur atau URL yang tidak ada di daftar menu"""
+- Jangan mengarang fitur atau URL yang tidak ada di konteks yang diberikan
+- Jika user meminta data nyata (daftar karyawan, absensi, kontrak, dll), WAJIB gunakan tool query_database. JANGAN menolak dengan alasan tidak punya akses."""
+
+
+def _build_context_messages() -> list[dict]:
+    context = _load_context()
+    schema = _load_schema()
+
+    messages = []
+    messages.append({
+        "role": "user",
+        "content": f"Berikut adalah daftar menu HRD yang tersedia di ERP Hasta:\n\n{context}"
+    })
+    messages.append({
+        "role": "assistant",
+        "content": "Baik, saya sudah memahami menu-menu HRD yang tersedia."
+    })
+
+    if schema:
+        messages.append({
+            "role": "user",
+            "content": f"Berikut adalah skema database ERP yang bisa kamu query menggunakan tool query_database:\n\n{schema}"
+        })
+        messages.append({
+            "role": "assistant",
+            "content": "Baik, saya sudah memahami skema database. Saya akan menggunakan tool query_database setiap kali user meminta data nyata dari database."
+        })
+
+    return messages
 
 
 async def _call_ollama_once(messages: list[dict]) -> dict:
@@ -117,8 +113,10 @@ async def chat_stream(messages: list[dict]):
     from app.services.database import run_select
 
     system_prompt = _build_system_prompt()
+    context_messages = _build_context_messages()
     full_messages = [
         {"role": "system", "content": system_prompt},
+        *context_messages,
         *messages,
     ]
 
