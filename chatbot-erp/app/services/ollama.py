@@ -59,11 +59,20 @@ def _build_system_prompt() -> str:
     schema_section = ""
     if schema:
         schema_section = f"""
-Kamu juga bisa mengambil data langsung dari database menggunakan tool `query_database`.
-Gunakan tool ini jika user meminta data nyata (daftar karyawan, rekap absensi, status kontrak, dll).
-Jika user hanya butuh navigasi menu, cukup arahkan ke URL yang sesuai tanpa memanggil tool.
+## Akses Database
 
-Berikut skema database yang bisa kamu query:
+Kamu WAJIB menggunakan tool `query_database` setiap kali user meminta data nyata dari sistem, seperti:
+- Daftar karyawan (siapa saja, berapa banyak, yang aktif, dll)
+- Data absensi, cuti, lembur
+- Status kontrak karyawan
+- Data rekrutmen, pelatihan, mutasi
+- Rekap atau statistik apapun dari database
+
+JANGAN pernah menolak permintaan data dengan alasan "tidak memiliki akses" atau "fitur belum tersedia" — kamu PUNYA akses via tool `query_database`.
+
+JANGAN mengarang data. Selalu panggil tool untuk mendapatkan data nyata.
+
+Berikut skema database yang tersedia:
 
 {schema}
 """
@@ -77,25 +86,26 @@ Saat ini kamu memiliki akses ke modul berikut:
 
 Kedepannya kamu akan mendapatkan akses ke modul-modul lainnya.
 
-Berikut adalah menu yang tersedia pada modul HRD:
+## Menu HRD yang tersedia
 
 {context}
 {schema_section}
-Panduan menjawab:
+## Panduan menjawab
+
 - Perkenalkan dirimu sebagai Hato jika user menyapa atau bertanya siapa kamu
 - Jawab dalam Bahasa Indonesia yang ramah dan singkat
 - Selalu sertakan URL lengkap (dengan base URL) ketika mengarahkan user ke suatu menu
 - Jika user bertanya tentang modul atau fitur yang belum kamu akses, sampaikan dengan sopan bahwa fitur tersebut belum tersedia untukmu saat ini namun akan segera hadir
-- Jangan mengarang fitur atau URL yang tidak ada di daftar di atas"""
+- Jangan mengarang fitur atau URL yang tidak ada di daftar menu"""
 
 
-async def _call_ollama(messages: list[dict], stream: bool) -> dict:
+async def _call_ollama_once(messages: list[dict]) -> dict:
     payload = {
         "model": MODEL,
         "messages": messages,
         "tools": TOOLS,
         "think": False,
-        "stream": stream,
+        "stream": False,
     }
     async with httpx.AsyncClient(timeout=120.0) as client:
         response = await client.post(f"{OLLAMA_URL}/api/chat", json=payload)
@@ -113,19 +123,25 @@ async def chat_stream(messages: list[dict]):
     ]
 
     # Agentic loop: handle tool calls sampai tidak ada lagi
+    tool_was_called = False
     while True:
-        data = await _call_ollama(full_messages, stream=False)
+        data = await _call_ollama_once(full_messages)
         msg = data.get("message", {})
         tool_calls = msg.get("tool_calls")
 
         if not tool_calls:
-            # Tidak ada tool call — stream jawaban akhir
+            if not tool_was_called:
+                # Tidak ada tool call sama sekali — stream langsung jawaban non-streaming ini
+                content = msg.get("content", "")
+                if content:
+                    yield content
+                return
+            # Setelah tool selesai — lanjut ke streaming final
             break
 
-        # Append assistant message dengan tool_calls ke history
+        tool_was_called = True
         full_messages.append(msg)
 
-        # Eksekusi setiap tool call
         for tc in tool_calls:
             fn = tc.get("function", {})
             tool_name = fn.get("name")
@@ -146,7 +162,7 @@ async def chat_stream(messages: list[dict]):
                 "tool_name": tool_name,
             })
 
-    # Stream jawaban akhir token per token
+    # Stream jawaban akhir setelah tool selesai
     payload = {
         "model": MODEL,
         "messages": full_messages,
