@@ -128,8 +128,8 @@ async def chat_stream(messages: list[dict]):
         data = await _call_ollama_once(full_messages)
         msg = data.get("message", {})
         tool_calls = msg.get("tool_calls")
-        print(f"[DEBUG] tool_calls: {tool_calls}")
-        print(f"[DEBUG] msg content: {msg.get('content', '')[:200]}")
+        print(f"[DEBUG] tool_calls: {tool_calls}", flush=True)
+        print(f"[DEBUG] msg content: {msg.get('content', '')[:200]}", flush=True)
 
         if not tool_calls:
             if not tool_was_called:

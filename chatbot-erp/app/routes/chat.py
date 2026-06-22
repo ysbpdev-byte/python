@@ -22,9 +22,11 @@ async def chat(request: ChatRequest):
 
     async def generate():
         try:
+            print(f"[DEBUG] chat_stream dipanggil dengan {len(messages)} pesan", flush=True)
             async for token in ollama.chat_stream(messages):
                 yield token
         except Exception as e:
+            print(f"[DEBUG] Error: {e}", flush=True)
             yield f"\n[Error: {str(e)}]"
 
     return StreamingResponse(generate(), media_type="text/plain")
