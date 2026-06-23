@@ -4,6 +4,11 @@ from pathlib import Path
 import httpx
 from dotenv import load_dotenv
 
+from app.services.intent import (
+    route_intent, NAVIGATION, DATA_QUERY, OTHER_MODULE, GREETING,
+)
+from app.services.menu import search_menu
+
 load_dotenv()
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://192.168.2.35:11434")
@@ -53,101 +58,146 @@ def _load_schema() -> str:
     return _schema_cache
 
 
-def _build_system_prompt() -> str:
+# ---------------------------------------------------------------------------
+# Penyusunan prompt per-intent
+# ---------------------------------------------------------------------------
+
+def _base_persona() -> str:
     return """Namamu adalah Hato, asisten AI dari ERP Hasta. Kamu membantu user menavigasi dan menggunakan sistem ERP Hasta.
 
 Base URL ERP: http://hasta.crabdance.com:16132
-
 Saat ini kamu hanya memiliki akses ke modul HRD (Human Resource Development).
+Jawab dalam Bahasa Indonesia yang ramah dan singkat."""
 
-## Cara menentukan jenis pertanyaan — ikuti urutan ini:
 
-### LANGKAH 1: Apakah pertanyaan ini tentang modul di luar HRD?
-Contoh: keuangan, akuntansi, inventory, pembelian, penjualan, produksi, gudang.
-→ Jika YA: jawab "Maaf, saat ini saya hanya bisa membantu untuk modul HRD. Modul [X] belum tersedia." STOP, jangan lanjut.
+def _system_for(intent: str, retrieved_menu: str | None) -> str:
+    persona = _base_persona()
 
-### LANGKAH 2: Apakah user meminta DATA NYATA dari sistem?
-Ciri-cirinya: kata "tampilkan", "lihat data", "berapa jumlah", "siapa saja", "daftar [sesuatu]", "rekap", "cek status [seseorang/sesuatu]".
-Contoh: "tampilkan daftar karyawan", "ada berapa karyawan aktif", "siapa yang belum absen hari ini", "cek kontrak si Budi".
-→ Jika YA: WAJIB panggil tool `query_database`. JANGAN mengarang data. JANGAN tolak dengan alasan tidak punya akses.
+    if intent == NAVIGATION:
+        return f"""{persona}
 
-### LANGKAH 3: Apakah user butuh panduan navigasi / cara menggunakan ERP?
-Ciri-cirinya: kata "di mana", "bagaimana cara", "mau buka", "mau akses", "menu apa", "saya mau [melakukan sesuatu]".
-Contoh: "di mana menu cuti?", "bagaimana cara tambah karyawan?", "saya mau ajukan cuti", "saya mau buat kontrak baru".
-→ Jika YA: jawab berdasarkan daftar menu HRD, sertakan URL lengkap (base URL + path). JANGAN panggil tool. JANGAN sebut database atau SQL.
+User sedang menanyakan navigasi/menu HRD. Di bawah ini adalah DAFTAR MENU yang relevan dengan pertanyaannya:
 
-### LANGKAH 4: Pertanyaan umum / sapaan
-Contoh: "halo", "kamu bisa apa?", "bantu saya".
-→ Perkenalkan diri sebagai Hato, jelaskan kamu bisa membantu navigasi menu HRD dan menampilkan data dari sistem ERP Hasta.
+==============================
+{retrieved_menu or "(tidak ada menu yang cocok ditemukan)"}
+==============================
 
-## Aturan tambahan
-- Jawab dalam Bahasa Indonesia yang ramah dan singkat
-- JANGAN pernah mengarang data atau URL yang tidak ada di daftar menu
-- JANGAN sebut kata "database", "tabel", "SQL", atau "query" kepada user
+ATURAN:
+- Jawab HANYA berdasarkan daftar menu di atas.
+- SALIN URL secara verbatim (path persis seperti di daftar). Tampilkan URL lengkap = Base URL + path.
+- DILARANG mengarang, menebak, atau mengubah URL. Jika menu yang diminta tidak ada di daftar di atas, katakan: "Maaf, menu tersebut tidak saya temukan di modul HRD."
+- JANGAN sebut kata "database", "tabel", "SQL", atau "query"."""
 
-## Aturan penulisan SQL
-- Pencarian nama atau teks SELALU gunakan ILIKE dengan wildcard: WHERE name ILIKE '%keyword%'
-- JANGAN gunakan = untuk mencari nama/teks, karena data di database bisa huruf kapital semua
+    if intent == DATA_QUERY:
+        return f"""{persona}
+
+User meminta DATA NYATA dari sistem. Kamu memiliki tool `query_database` untuk mengambil data.
+
+ATURAN:
+- WAJIB panggil tool `query_database` untuk mengambil data. JANGAN mengarang data. JANGAN menolak dengan alasan tidak punya akses.
+- Setelah hasil kembali, sajikan dengan ramah. JANGAN sebut kata "database", "tabel", "SQL", atau "query" kepada user.
+
+Aturan penulisan SQL:
+- Pencarian nama/teks SELALU gunakan ILIKE dengan wildcard: WHERE name ILIKE '%keyword%'
+- JANGAN gunakan = untuk mencari nama/teks, karena data di database bisa huruf kapital semua.
 - Contoh BENAR: WHERE e.name ILIKE '%matthew%'
 - Contoh SALAH: WHERE e.name = 'Matthew Kevin'"""
 
+    if intent == OTHER_MODULE:
+        return f"""{persona}
 
-def _build_context_messages() -> list[dict]:
-    context = _load_context()
+User menanyakan modul di luar HRD. Jawab dengan sopan: "Maaf, saat ini saya hanya bisa membantu untuk modul HRD. Modul tersebut belum tersedia." Jangan mengarang informasi."""
+
+    # GREETING / default
+    return f"""{persona}
+
+Perkenalkan dirimu sebagai Hato dan jelaskan bahwa kamu bisa membantu menavigasi menu HRD serta menampilkan data dari sistem ERP Hasta. Singkat dan ramah."""
+
+
+def _data_context_pair() -> list[dict]:
+    """Skema database sebagai pasangan user/assistant. Hanya dipakai untuk DATA_QUERY."""
     schema = _load_schema()
-
-    messages = []
-    messages.append({
-        "role": "user",
-        "content": f"Berikut adalah daftar menu HRD yang tersedia di ERP Hasta:\n\n{context}"
-    })
-    messages.append({
-        "role": "assistant",
-        "content": "Baik, saya sudah memahami menu-menu HRD yang tersedia."
-    })
-
-    if schema:
-        messages.append({
+    if not schema:
+        return []
+    return [
+        {
             "role": "user",
-            "content": f"Berikut adalah skema database ERP yang bisa kamu query menggunakan tool query_database:\n\n{schema}"
-        })
-        messages.append({
+            "content": f"Berikut adalah skema tabel yang bisa kamu gunakan saat memanggil tool query_database:\n\n{schema}",
+        },
+        {
             "role": "assistant",
-            "content": "Baik, saya sudah memahami skema database. Saya akan menggunakan tool query_database setiap kali user meminta data nyata dari database."
-        })
+            "content": "Baik, saya sudah memahami skema tabelnya. Saya akan memanggil tool query_database setiap kali user meminta data nyata dari sistem.",
+        },
+    ]
 
-    return messages
+
+def _sanitize_history(messages: list[dict], keep_turns: int = 4) -> list[dict]:
+    """Higiene history: buang artefak tool & pesan kosong, sisakan beberapa turn terakhir.
+
+    Hanya menyimpan role user/assistant dengan content non-kosong, lalu memotong
+    ke `keep_turns * 2` pesan terakhir. Mencegah priming berlebih yang membuat
+    model terpaku memanggil tool.
+    """
+    clean = [
+        {"role": m["role"], "content": m["content"]}
+        for m in messages
+        if m.get("role") in ("user", "assistant") and m.get("content", "").strip()
+    ]
+    if keep_turns > 0:
+        clean = clean[-(keep_turns * 2):]
+    return clean
 
 
-async def _call_ollama_once(messages: list[dict]) -> dict:
+# ---------------------------------------------------------------------------
+# Plumbing Ollama
+# ---------------------------------------------------------------------------
+
+async def _call_ollama_once(messages: list[dict], tools: list | None) -> dict:
     payload = {
         "model": MODEL,
         "messages": messages,
-        "tools": TOOLS,
         "think": False,
         "stream": False,
     }
+    if tools:
+        payload["tools"] = tools
     async with httpx.AsyncClient(timeout=120.0) as client:
         response = await client.post(f"{OLLAMA_URL}/api/chat", json=payload)
         response.raise_for_status()
         return response.json()
 
 
-async def chat_stream(messages: list[dict]):
+async def _stream_chat(full_messages: list[dict], tools: list | None = None):
+    """Streaming jawaban. Bila tools=None, model tidak dapat memanggil tool sama sekali."""
+    payload = {
+        "model": MODEL,
+        "messages": full_messages,
+        "think": False,
+        "stream": True,
+    }
+    if tools:
+        payload["tools"] = tools
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        async with client.stream("POST", f"{OLLAMA_URL}/api/chat", json=payload) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if not line:
+                    continue
+                chunk = json.loads(line)
+                token = chunk.get("message", {}).get("content", "")
+                if token:
+                    yield token
+                if chunk.get("done"):
+                    break
+
+
+async def _agentic_then_stream(full_messages: list[dict]):
+    """Loop tool query_database sampai selesai, lalu stream jawaban akhir."""
     from app.services.database import run_select
 
-    system_prompt = _build_system_prompt()
-    context_messages = _build_context_messages()
-    full_messages = [
-        {"role": "system", "content": system_prompt},
-        *context_messages,
-        *messages,
-    ]
-
-    # Agentic loop: handle tool calls sampai tidak ada lagi
     tool_was_called = False
     while True:
-        data = await _call_ollama_once(full_messages)
+        data = await _call_ollama_once(full_messages, tools=TOOLS)
         msg = data.get("message", {})
         tool_calls = msg.get("tool_calls")
         print(f"[DEBUG] tool_calls: {tool_calls}", flush=True)
@@ -184,22 +234,62 @@ async def chat_stream(messages: list[dict]):
                 "tool_name": tool_name,
             })
 
-    # Stream jawaban akhir setelah tool selesai
-    payload = {
-        "model": MODEL,
-        "messages": full_messages,
-        "think": False,
-        "stream": True,
-    }
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        async with client.stream("POST", f"{OLLAMA_URL}/api/chat", json=payload) as response:
-            response.raise_for_status()
-            async for line in response.aiter_lines():
-                if not line:
-                    continue
-                chunk = json.loads(line)
-                token = chunk.get("message", {}).get("content", "")
-                if token:
-                    yield token
-                if chunk.get("done"):
-                    break
+    async for token in _stream_chat(full_messages, tools=None):
+        yield token
+
+
+# ---------------------------------------------------------------------------
+# Handler per-intent
+# ---------------------------------------------------------------------------
+
+async def _handle_navigation(latest: str, history: list[dict]):
+    menu = search_menu(latest)
+    full = [
+        {"role": "system", "content": _system_for(NAVIGATION, menu)},
+        *history,
+        {"role": "user", "content": latest},
+    ]
+    async for token in _stream_chat(full, tools=None):
+        yield token
+
+
+async def _handle_data(latest: str, history: list[dict]):
+    full = [
+        {"role": "system", "content": _system_for(DATA_QUERY, None)},
+        *_data_context_pair(),
+        *history,
+        {"role": "user", "content": latest},
+    ]
+    async for token in _agentic_then_stream(full):
+        yield token
+
+
+async def _handle_simple(intent: str, latest: str, history: list[dict]):
+    full = [
+        {"role": "system", "content": _system_for(intent, None)},
+        *history,
+        {"role": "user", "content": latest},
+    ]
+    async for token in _stream_chat(full, tools=None):
+        yield token
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+async def chat_stream(messages: list[dict]):
+    latest = messages[-1]["content"]
+    intent = await route_intent(latest)
+    print(f"[DEBUG] intent: {intent}", flush=True)
+    history = _sanitize_history(messages[:-1])
+
+    if intent == DATA_QUERY:
+        async for token in _handle_data(latest, history):
+            yield token
+    elif intent == NAVIGATION:
+        async for token in _handle_navigation(latest, history):
+            yield token
+    else:  # OTHER_MODULE / GREETING
+        async for token in _handle_simple(intent, latest, history):
+            yield token

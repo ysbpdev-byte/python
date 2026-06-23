@@ -18,11 +18,18 @@ async def chat(request: ChatRequest):
     if not request.messages:
         raise HTTPException(status_code=400, detail="Messages tidak boleh kosong")
 
-    messages = [{"role": m.role, "content": m.content} for m in request.messages]
+    messages = [
+        {"role": m.role, "content": m.content}
+        for m in request.messages
+        if m.content and m.content.strip()
+    ]
+
+    if not messages:
+        raise HTTPException(status_code=400, detail="Messages tidak boleh kosong")
 
     async def generate():
         try:
-            print(f"[DEBUG] chat_stream dipanggil dengan {len(messages)} pesan", flush=True)
+            print(f"[DEBUG] chat_stream dipanggil dengan {len(messages)} pesan (session={request.session_id})", flush=True)
             async for token in ollama.chat_stream(messages):
                 yield token
         except Exception as e:
