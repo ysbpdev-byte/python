@@ -11,17 +11,32 @@ Saat ini Hato memiliki akses ke **Modul HRD**. Modul lainnya akan ditambahkan se
 ## Arsitektur
 
 ```
-ERP Laravel ──POST /api/chat──► Chatbot Service (FastAPI) ──► Ollama (Qwen3.5)
+ERP Laravel ──POST /api/chat──► Chatbot Service (FastAPI)
                                         │
-                                        ▼ (jika butuh data)
-                                  PostgreSQL ERP DB
+                                        ▼
+                              Intent Router (keyword + LLM fallback)
+                                        │
+                ┌───────────────────────┼───────────────────────┐
+                ▼                       ▼                       ▼
+         NAVIGATION              DATA_QUERY            OTHER_MODULE / GREETING
+     (retrieval menu,        (agentic loop +              (jawaban langsung,
+      TANPA tool)             tool query_database)          TANPA tool)
+                │                       │
+                ▼                       ▼
+       hrd.md (verbatim)         Ollama (Qwen) ──► PostgreSQL ERP DB
 ```
 
 **Tech Stack:**
 - Python 3.12 + FastAPI
-- Ollama (self-hosted LLM — Qwen3.5)
+- Ollama (self-hosted LLM — Qwen)
 - asyncpg (koneksi PostgreSQL async)
 - Docker
+
+**Prinsip desain:** setiap pesan user dirutekan ke salah satu *intent* lebih dulu.
+Tool `query_database` **hanya** dilampirkan saat intent `DATA_QUERY`. Untuk
+navigasi, model tidak diberi tool sama sekali dan hanya menerima potongan menu
+yang relevan dari `hrd.md` (verbatim) — sehingga URL tidak mungkin dikarang dan
+model tidak "terpaku" memanggil database pada pertanyaan yang bukan soal data.
 
 ---
 
@@ -41,7 +56,9 @@ chatbot-erp/
     ├── routes/
     │   └── chat.py              # POST /api/chat
     ├── services/
-    │   ├── ollama.py            # Ollama client + tool calling + agentic loop
+    │   ├── intent.py            # Klasifikasi intent (keyword + fallback LLM)
+    │   ├── menu.py              # Retrieval section menu dari hrd.md (verbatim)
+    │   ├── ollama.py            # Dispatcher per-intent + tool calling + agentic loop
     │   └── database.py          # SQL executor (SELECT only, max 100 rows)
     └── context/
         ├── hrd.md               # Konteks navigasi menu HRD
@@ -113,7 +130,12 @@ Berikut karyawan yang kontraknya akan habis bulan ini:
 ...
 ```
 
-**Catatan:** `messages` adalah array penuh percakapan. Klien (ERP) bertanggung jawab menyimpan dan mengirimkan history percakapan di setiap request.
+**Field:**
+- `messages` (wajib): array penuh percakapan. Klien (ERP) bertanggung jawab
+  menyimpan dan mengirimkan history di setiap request. Pesan dengan `content`
+  kosong diabaikan; jika semua pesan kosong, response `400`.
+- `session_id` (opsional): hanya dipakai untuk penelusuran log saat ini
+  (tidak ada penyimpanan history di sisi server).
 
 ---
 
@@ -136,19 +158,52 @@ Chat UI untuk testing langsung via browser.
 
 ## Cara Kerja Hato
 
-### Navigasi Menu
-Jika user bertanya tentang menu atau fitur ERP, Hato langsung menjawab berdasarkan konteks di `app/context/hrd.md` tanpa memanggil database.
+Setiap pesan user melewati **3 tahap**: routing intent → muat konteks yang
+relevan → generate jawaban. Kuncinya: konteks dan tool yang dimuat berbeda-beda
+tergantung intent, sehingga model tidak kebanjiran konteks dan tidak salah pilih
+antara "cari menu" vs "cari data".
+
+### Tahap 1 — Routing Intent (`app/services/intent.py`)
+
+`route_intent()` mengklasifikasi **pesan terakhir** user ke salah satu label:
+
+| Label | Contoh pesan | Penanganan |
+|---|---|---|
+| `NAVIGATION` | "di mana menu cuti", "cara tambah karyawan" | Retrieval menu, **tanpa** tool |
+| `DATA_QUERY` | "berapa karyawan aktif", "siapa yang cuti hari ini" | Agentic loop + tool `query_database` |
+| `OTHER_MODULE` | "lihat data penjualan", "menu keuangan" | Jawaban penolakan sopan |
+| `GREETING` | "halo", "kamu bisa apa" | Perkenalan singkat |
+
+Klasifikasi memakai **keyword** lebih dulu (instan, tanpa panggilan model). Hanya
+jika pesan ambigu, dilakukan **satu panggilan LLM kecil** sebagai fallback.
+Label routing dapat dilihat di log: `[DEBUG] intent: NAVIGATION`.
+
+### Tahap 2 — Navigasi Menu (`app/services/menu.py`)
+
+Untuk intent `NAVIGATION`, `search_menu()` mengambil **hanya section menu yang
+relevan** dari `app/context/hrd.md` (dicocokkan via keyword + sinonim), lalu
+menyisipkannya **verbatim** ke prompt. Model diinstruksikan menyalin URL persis
+apa adanya dan menolak jika menu tidak ada di daftar.
 
 ```
 User: "Saya mau ajukan cuti"
-Hato: "Silakan ke menu Buat Pengajuan Cuti di http://hasta.crabdance.com:16132/hr/leaves/create"
+  → intent: NAVIGATION
+  → search_menu mengambil section "Cuti & Izin" dari hrd.md
+  → Hato: "Silakan ke menu Buat Pengajuan Cuti di
+            http://hasta.crabdance.com:16132/hr/leaves/create"
 ```
 
-### Query Database (Agentic Loop)
-Jika user meminta data nyata, Hato menggunakan tool `query_database`:
+Pada tahap ini tool `query_database` **tidak dilampirkan sama sekali**, sehingga
+model secara struktural tidak bisa (dan tidak tergoda) memanggil database.
+
+### Tahap 3 — Query Database / Agentic Loop (`app/services/ollama.py`)
+
+Untuk intent `DATA_QUERY`, skema tabel (`db_schema.md`) dimuat dan tool
+`query_database` dilampirkan:
 
 ```
 User: "Tampilkan 5 karyawan terbaru"
+  → intent: DATA_QUERY
   → Hato generate SQL SELECT
   → SQL dieksekusi ke PostgreSQL (SELECT only, maks 100 baris)
   → Hasil dikembalikan ke Hato
@@ -160,15 +215,34 @@ User: "Tampilkan 5 karyawan terbaru"
 - `LIMIT 100` otomatis ditambahkan jika tidak ada
 - Gunakan user PostgreSQL dengan privilege `SELECT` saja
 
+### Manajemen History
+
+History percakapan dikirim penuh oleh klien di setiap request, lalu
+**dibersihkan di server** (`_sanitize_history`): artefak tool dibuang dan hanya
+±4 turn terakhir yang dipertahankan. Ini mencegah jawaban data lama "mem-prime"
+model agar terus memanggil tool pada turn navigasi berikutnya.
+
 ---
 
 ## Menambah Konteks Modul Baru
 
-1. Buat file markdown di `app/context/` (contoh: `finance.md`)
-2. Update system prompt di `app/services/ollama.py` untuk load file baru
-3. Restart service: `docker compose restart`
+Arsitektur saat ini dirancang untuk modul HRD. Untuk menambah modul baru:
 
-Tidak perlu rebuild image jika hanya mengubah file context (karena di-mount sebagai volume).
+1. **Buat file context** markdown di `app/context/` (contoh: `finance.md`),
+   ikuti struktur `hrd.md` (header `##`/`###` per section + tabel
+   `| Label | URL | Kegunaan |`).
+2. **Daftarkan label intent baru** di `app/services/intent.py`:
+   - Pindahkan keyword modul tersebut dari `_OTHER_MODULE_KW` (yang saat ini
+     menolaknya) ke daftar keyword intent navigasi/data yang sesuai.
+3. **Tambah retrieval** untuk file context baru (mengikuti pola `app/services/menu.py`),
+   dan arahkan handler di `app/services/ollama.py` (`chat_stream` dispatcher) ke
+   konteks tersebut.
+4. **Restart service:** `docker compose restart`.
+
+> Mengubah **isi** file context (`hrd.md`, `db_schema.md`) saja tidak perlu
+> rebuild image — folder `app/context` di-mount sebagai volume, cukup
+> `docker compose restart`. Namun menambah **kode** (modul/handler baru) tetap
+> perlu `docker compose up -d --build`.
 
 ---
 
