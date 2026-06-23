@@ -150,9 +150,6 @@
     // history percakapan (tidak termasuk pesan awal dari bot)
     const history = [];
 
-    // session_id unik per tab browser
-    const sessionId = crypto.randomUUID();
-
     inputEl.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) sendMessage();
     });
@@ -183,7 +180,7 @@
         const res = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ messages: history, session_id: sessionId }),
+          body: JSON.stringify({ messages: history }),
         });
 
         if (!res.ok) {
