@@ -15,18 +15,18 @@ CREATE TABLE employees (
     c_shortname varchar,    -- nama singkat
     c_email varchar,
     c_phone varchar,
-    c_gender varchar,       -- jenis kelamin
-    c_religion varchar,     -- agama
-    c_marital_status varchar,
-    c_blood_type varchar,
+    c_gender varchar,       -- L = Laki-laki, P = Perempuan
+    c_religion varchar,     -- ISLAM / KRISTEN / BUDHA / KATHOLIK / HINDU / KONG HU CU
+    c_marital_status varchar, -- B = Bujang, K = Kawin, D = Duda, J = Janda
+    c_blood_type varchar,   -- A / B / AB / O (dan varian rhesus: A+, O+, dll)
     c_nik varchar,          -- NIK KTP
     c_npwp varchar,
     c_birth_place varchar,
     c_address varchar,      -- alamat domisili
     c_city varchar,
-    c_last_education varchar,
-    c_contract varchar,     -- jenis kontrak
-    c_status varchar,       -- status karyawan: active, resigned, dll
+    c_last_education varchar, -- free-text: SD, SMP/SLTP, SMA/SMK/STM/SLTA, D3, S1, S2
+    c_contract varchar,     -- T = Tetap, B = Bulanan, BR = Borongan, H = Harian
+    c_status varchar,       -- kode PTKP/PPh21: TK/0, TK/1, TK/2, TK/3 (tidak kawin), K/0, K/1, K/2, K/3 (kawin)
     d_birth_date date,
     d_join_date date,       -- tanggal bergabung
     d_leave_date date,      -- tanggal keluar
@@ -36,7 +36,7 @@ CREATE TABLE employees (
     n_title_id bigint,      -- FK -> titles.c_code
     n_employment_type_id bigint,
     n_child_count int,
-    l_status boolean,       -- true = aktif
+    l_status boolean,       -- true = aktif, false = non-aktif (resign/pensiun/dll)
     created_at timestamp,
     updated_at timestamp
 );
@@ -80,7 +80,7 @@ CREATE TABLE hr_contracts (
     deleted_at timestamp,
     created_at timestamp,
     updated_at timestamp
-    -- status kontrak (computed): pending, rejected, active, expiring (< 30 hari), expired
+    -- status (via approval_requests): pending | approved; expiring = approved + d_end_date < 30 hari; expired = approved + d_end_date lewat
 );
 
 -- Evaluasi Kontrak
@@ -101,7 +101,7 @@ CREATE TABLE mutations (
     id bigint PRIMARY KEY,
     c_code varchar,         -- format: MUT-YYYYMMDD-###
     c_reason text,
-    c_status varchar,
+    c_status varchar,       -- confirmed (+ pending/rejected)
     d_mutation_date date,
     n_employee_id bigint,
     n_department_from_id bigint,
@@ -134,9 +134,9 @@ CREATE TABLE attendance_requests (
 -- Override Jadwal Kerja
 CREATE TABLE schedule_overrides (
     id bigint PRIMARY KEY,
-    c_forced_status varchar, -- hadir/izin/sakit/dll
+    c_forced_status varchar, -- kode status absensi (lihat legenda di tabel absensi: WFH, SD, SDI, I, CT, CK, CH, CM, CMS, DL, OUT, PH, FK, FT, LM, O, A, ALW, T, T1, T2, T3, TS, TM1, TM2)
     c_reason text,
-    c_status varchar,        -- pending/approved/rejected
+    c_status varchar,        -- pending | approved | rejected (default: pending)
     d_override_date date,
     n_employee_id bigint,
     n_approved_by bigint,    -- FK -> employees.id
@@ -163,7 +163,7 @@ CREATE TABLE trainings (
     id bigint PRIMARY KEY,
     c_training_code varchar, -- format: TRN-001
     c_name varchar,
-    c_training_type varchar, -- Internal / Eksternal
+    c_training_type varchar, -- Internal, Eksternal dari form
     d_start date,
     d_end date,
     d_actual_start date,
@@ -182,7 +182,7 @@ CREATE TABLE training_participants (
     n_training_id bigint,   -- FK -> trainings.id
     n_employee_id bigint,   -- FK -> employees.id
     n_grade float,          -- nilai peserta
-    c_status varchar,
+    c_status varchar,       -- lulus | tidak_lulus (null = belum dinilai)
     created_at timestamp,
     updated_at timestamp
 );
@@ -200,10 +200,10 @@ CREATE TABLE competencies (
 CREATE TABLE recruitment_requests (
     id bigint PRIMARY KEY,
     c_position_title varchar,
-    c_employment_status varchar,
-    c_min_education varchar,
-    c_gender varchar,
-    c_status varchar,
+    c_employment_status varchar, -- kontrak | magang | outsourcing | harian
+    c_min_education varchar, -- slta | diploma | sarjana
+    c_gender varchar,        -- L | P | bebas
+    c_status varchar,        -- approved
     d_needed_date date,
     n_department_id bigint,
     n_headcount int,
@@ -221,7 +221,7 @@ CREATE TABLE candidates (
     c_phone varchar,
     c_gender varchar,
     c_last_education varchar,
-    c_status varchar,        -- active, hired, rejected, dll
+    c_status varchar,        -- applied | in_progress | on_hold | active | accepted | rejected
     d_birth_date date,
     n_employee_id bigint,    -- FK -> employees.id (jika sudah diterima)
     n_position_id bigint,
@@ -232,8 +232,8 @@ CREATE TABLE candidates (
 -- Tahap Rekrutmen
 CREATE TABLE recruitment_processes (
     id bigint PRIMARY KEY,
-    c_stage varchar,         -- screening_cv, interview_hrd, interview_user, mcu, offering
-    c_status varchar,        -- pending, passed, failed, scheduled
+    c_stage varchar,         -- pre_interview | interview_hrd | interview_user | psikotest | technical_test | medical_checkup
+    c_status varchar,        -- ongoing | approved | rejected
     d_scheduled_at timestamp,
     n_candidate_id bigint,   -- FK -> candidates.id
     created_at timestamp,
@@ -335,7 +335,7 @@ CREATE TABLE employee_discipline_summaries (
 
 ```sql
 -- 5 karyawan aktif terbaru
-SELECT id, c_code, c_name, c_status, d_join_date FROM employees WHERE l_status = true ORDER BY d_join_date DESC LIMIT 5;
+SELECT id, c_code, c_name, l_status, d_join_date FROM employees WHERE l_status = true ORDER BY d_join_date DESC LIMIT 5;
 
 -- Karyawan per departemen
 SELECT d.c_name AS departemen, COUNT(e.id) AS jumlah

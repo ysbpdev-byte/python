@@ -1,60 +1,88 @@
 # OCR Service
 
-REST API untuk extract teks dari gambar dan PDF menggunakan PaddleOCR-VL (layout analysis + VLM). Dioptimalkan untuk GPU NVIDIA Blackwell (RTX 5060 Ti, sm120).
+REST API untuk ekstraksi teks dari gambar dan PDF, mendukung dua engine OCR yang bisa dipilih per request.
 
-## Requirement
+## Engine yang Tersedia
 
-- Docker + Docker Compose
-- NVIDIA Container Toolkit
-- GPU NVIDIA Blackwell (sm120) atau Ampere/Ada ke atas
+| Engine | Model | VRAM | Cocok untuk |
+|---|---|---|---|
+| `glm` | GLM-OCR via Ollama | ~4 GB | Default, ringan, akurasi bagus |
+| `paddle` | PaddleOCR-VL | ~9-15 GB | Dokumen kompleks dengan tabel/chart |
 
-## Menjalankan Service
+## Cara Menjalankan
 
 ```bash
-cd ocr-service
 sudo docker compose up -d
 ```
 
-Service berjalan di port **2006**. Cek status:
+Service berjalan di port `2006`. Kedua engine menggunakan **lazy loading** — model hanya dimuat ke VRAM saat ada request masuk, dan otomatis di-unload setelah idle `MODEL_IDLE_TIMEOUT` detik.
 
-```bash
-sudo docker compose logs -f
-```
+## Environment Variables
 
-Tunggu hingga muncul:
-```
-Uvicorn running on http://0.0.0.0:2006
-```
+| Variable | Default | Keterangan |
+|---|---|---|
+| `DEFAULT_OCR_ENGINE` | `glm` | Engine default jika parameter `engine` tidak disertakan |
+| `OLLAMA_HOST` | `http://172.17.0.1:11434` | URL Ollama server (`172.17.0.1` = host machine dari dalam container) |
+| `OLLAMA_GLM_MODEL` | `glm-ocr` | Nama model GLM di Ollama |
+| `MODEL_IDLE_TIMEOUT` | `300` | Detik sebelum model di-unload dari VRAM saat idle |
 
-## Endpoint
-
-### `GET /health`
-
-Cek apakah service berjalan.
-
-**Response:**
-```json
-{"status": "ok"}
-```
-
----
+## API
 
 ### `POST /extract`
 
-Upload gambar atau PDF untuk di-extract teksnya.
+Ekstrak teks dari file gambar atau PDF.
 
-**Request:**
-- Method: `POST`
-- Content-Type: `multipart/form-data`
-- Body: `file` — file gambar atau PDF
+**Query Parameters:**
 
-**Format file yang didukung:**
-`.jpg`, `.jpeg`, `.png`, `.bmp`, `.tiff`, `.tif`, `.webp`, `.pdf`
+| Parameter | Tipe | Default | Keterangan |
+|---|---|---|---|
+| `engine` | `glm` \| `paddle` | nilai `DEFAULT_OCR_ENGINE` | Engine OCR yang dipakai |
 
-**Response:**
+**Form Data:**
+
+| Field | Tipe | Keterangan |
+|---|---|---|
+| `file` | file | File gambar atau PDF |
+
+**Format yang didukung:** `.jpg`, `.jpeg`, `.png`, `.bmp`, `.tiff`, `.tif`, `.webp`, `.pdf`
+
+**Contoh Request:**
+
+```bash
+# Pakai engine default (glm)
+curl -X POST "http://192.168.2.35:2006/extract" \
+  -F "file=@document.jpg"
+
+# Pilih engine secara eksplisit
+curl -X POST "http://192.168.2.35:2006/extract?engine=glm" \
+  -F "file=@document.jpg"
+
+curl -X POST "http://192.168.2.35:2006/extract?engine=paddle" \
+  -F "file=@document.jpg"
+```
+
+**Contoh Response (engine=glm):**
+
+```json
+{
+  "filename": "delivery note.jpg",
+  "engine": "glm",
+  "blocks": [
+    {
+      "label": "text",
+      "content": "PT. YANASURYA BHAKTIPERSADA\nJl. Pahlawan, Desa Banjarbendo...",
+      "bbox": null
+    }
+  ]
+}
+```
+
+**Contoh Response (engine=paddle):**
+
 ```json
 {
   "filename": "invoice.jpg",
+  "engine": "paddle",
   "blocks": [
     {
       "label": "doc_title",
@@ -65,52 +93,55 @@ Upload gambar atau PDF untuk di-extract teksnya.
       "label": "text",
       "content": "PT. Maju Jaya",
       "bbox": [8, 199, 361, 342]
-    },
-    {
-      "label": "paragraph_title",
-      "content": "Total Pembayaran",
-      "bbox": [27, 455, 341, 520]
     }
   ]
 }
 ```
 
-**Label yang mungkin muncul:**
+> **Catatan perbedaan output:**
+> - `glm` → satu block berisi seluruh teks, `bbox` selalu `null`
+> - `paddle` → beberapa block dengan label dan koordinat `bbox` per blok
+
+**Label pada engine paddle:**
 
 | Label | Keterangan |
-|-------|------------|
+|---|---|
 | `doc_title` | Judul dokumen |
 | `paragraph_title` | Sub-judul / heading |
 | `text` | Paragraf teks biasa |
 | `table` | Konten tabel |
-| `image` | Blok gambar (konten kosong) |
-| `vision_footnote` | Caption gambar / footnote |
+| `image` | Blok gambar |
+| `vision_footnote` | Caption / footnote |
 
-**Error:**
+---
+
+### `GET /health`
+
+Cek status service dan engine default yang aktif.
+
+**Contoh Response:**
+
 ```json
-{"detail": "File type '.xyz' not supported. Allowed: .jpg, .jpeg, ..."}
+{
+  "status": "ok",
+  "default_engine": "glm"
+}
 ```
 
 ---
 
 ## Contoh Penggunaan
 
-### curl
-
-```bash
-curl -X POST http://localhost:2006/extract \
-  -F "file=@invoice.jpg"
-```
-
 ### Python
 
 ```python
 import requests
 
-with open("invoice.jpg", "rb") as f:
+with open("document.jpg", "rb") as f:
     response = requests.post(
-        "http://localhost:2006/extract",
-        files={"file": ("invoice.jpg", f, "image/jpeg")}
+        "http://192.168.2.35:2006/extract",
+        files={"file": ("document.jpg", f, "image/jpeg")},
+        params={"engine": "glm"},  # opsional
     )
 
 data = response.json()
@@ -118,30 +149,53 @@ for block in data["blocks"]:
     print(f"[{block['label']}] {block['content']}")
 ```
 
-### Swagger UI
+---
 
-Buka browser ke:
+## UI Testing
+
+Swagger UI tersedia di:
 ```
-http://[IP-SERVER]:2006/docs
+http://192.168.2.35:2006/docs
 ```
 
 ---
+
+## Arsitektur
+
+```
+Client
+  │
+  ▼
+OCR Service (port 2006, Docker container)
+  ├── engine=glm    ──► Ollama (port 11434, host machine) ──► GLM-OCR model
+  └── engine=paddle ──► PaddleOCR-VL (dalam container)
+```
+
+## Kebutuhan VRAM (GPU: RTX 5060 Ti 16 GB)
+
+| Kondisi | VRAM terpakai |
+|---|---|
+| Idle (tidak ada request) | ~160 MB |
+| GLM-OCR loaded | ~4 GB |
+| PaddleOCR-VL loaded | ~9-15 GB |
+| GLM + Qwen3.5 (LLM lain) bersamaan | ~12 GB |
 
 ## Struktur Project
 
 ```
 ocr-service/
-├── main.py          # FastAPI app, routing, validasi file
-├── extractor.py     # PaddleOCR-VL pipeline & parsing hasil
-├── requirements.txt # Dependensi Python
-├── compose.yaml     # Docker Compose config
+├── main.py           # FastAPI app, routing, pemilihan engine
+├── extractor.py      # Engine PaddleOCR-VL
+├── extractor_glm.py  # Engine GLM-OCR via Ollama
+├── requirements.txt  # Dependensi Python
+├── compose.yaml      # Docker Compose config
 └── README.md
 ```
 
 ## Manajemen Container
 
 ```bash
-# Jalankan (background)
+# Jalankan
 sudo docker compose up -d
 
 # Lihat log realtime
