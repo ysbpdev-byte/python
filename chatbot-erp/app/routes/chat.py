@@ -22,8 +22,8 @@ async def chat(request: ChatRequest):
 
     async def generate():
         try:
-            print(f"[DEBUG] chat_stream dipanggil dengan {len(messages)} pesan", flush=True)
-            async for token in ollama.chat_stream(messages):
+            print(f"[DEBUG] chat_stream dipanggil dengan {len(messages)} pesan, session_id={request.session_id}", flush=True)
+            async for token in ollama.chat_stream(messages, session_id=request.session_id):
                 yield token
         except Exception as e:
             print(f"[DEBUG] Error: {e}", flush=True)

@@ -12,6 +12,9 @@ MODEL = os.getenv("OLLAMA_MODEL", "qwen3.5")
 _context_cache: str | None = None
 _schema_cache: str | None = None
 
+# Session store: session_id -> list of messages (user/assistant/tool, tanpa system+context prefix)
+_sessions: dict[str, list[dict]] = {}
+
 TOOLS = [
     {
         "type": "function",
@@ -23,7 +26,7 @@ TOOLS = [
                 "properties": {
                     "sql": {
                         "type": "string",
-                        "description": "Query SQL SELECT yang akan dijalankan terhadap database ERP"
+                        "description": "Query SQL SELECT yang akan dijalankan terhadap database ERP. PENTING: untuk pencarian nama atau teks, SELALU gunakan ILIKE dengan wildcard (%) bukan = atau LIKE. Contoh: WHERE name ILIKE '%matthew%' bukan WHERE name = 'matthew'. Ini karena data di database bisa huruf kapital semua atau campuran."
                     }
                 },
                 "required": ["sql"]
@@ -82,7 +85,13 @@ Contoh: "halo", "kamu bisa apa?", "bantu saya".
 ## Aturan tambahan
 - Jawab dalam Bahasa Indonesia yang ramah dan singkat
 - JANGAN pernah mengarang data atau URL yang tidak ada di daftar menu
-- JANGAN sebut kata "database", "tabel", "SQL", atau "query" kepada user"""
+- JANGAN sebut kata "database", "tabel", "SQL", atau "query" kepada user
+
+## Aturan penulisan SQL
+- Pencarian nama atau teks SELALU gunakan ILIKE dengan wildcard: WHERE name ILIKE '%keyword%'
+- JANGAN gunakan = untuk mencari nama/teks, karena data di database bisa huruf kapital semua
+- Contoh BENAR: WHERE e.name ILIKE '%matthew%'
+- Contoh SALAH: WHERE e.name = 'Matthew Kevin'"""
 
 
 def _build_context_messages() -> list[dict]:
@@ -126,19 +135,33 @@ async def _call_ollama_once(messages: list[dict]) -> dict:
         return response.json()
 
 
-async def chat_stream(messages: list[dict]):
+async def chat_stream(messages: list[dict], session_id: str | None = None):
     from app.services.database import run_select
 
     system_prompt = _build_system_prompt()
     context_messages = _build_context_messages()
+
+    # Ambil history lengkap dari session store, atau mulai baru
+    if session_id and session_id in _sessions:
+        session_history = _sessions[session_id]
+        # Tambahkan hanya pesan user terbaru (pesan terakhir dari request)
+        last_user_msg = messages[-1]
+        session_history.append(last_user_msg)
+    else:
+        # Session baru — gunakan semua messages dari frontend
+        session_history = list(messages)
+        if session_id:
+            _sessions[session_id] = session_history
+
     full_messages = [
         {"role": "system", "content": system_prompt},
         *context_messages,
-        *messages,
+        *session_history,
     ]
 
     # Agentic loop: handle tool calls sampai tidak ada lagi
     tool_was_called = False
+    final_content = ""
     while True:
         data = await _call_ollama_once(full_messages)
         msg = data.get("message", {})
@@ -147,17 +170,23 @@ async def chat_stream(messages: list[dict]):
         print(f"[DEBUG] msg content: {msg.get('content', '')[:200]}", flush=True)
 
         if not tool_calls:
+            final_content = msg.get("content", "")
             if not tool_was_called:
-                # Tidak ada tool call sama sekali — stream langsung jawaban non-streaming ini
-                content = msg.get("content", "")
-                if content:
-                    yield content
+                # Tidak ada tool call sama sekali — yield langsung
+                if final_content:
+                    yield final_content
+                # Simpan jawaban assistant ke session
+                if session_id:
+                    session_history.append({"role": "assistant", "content": final_content})
                 return
             # Setelah tool selesai — lanjut ke streaming final
             break
 
         tool_was_called = True
         full_messages.append(msg)
+        # Simpan tool_calls message ke session history
+        if session_id:
+            session_history.append(msg)
 
         for tc in tool_calls:
             fn = tc.get("function", {})
@@ -173,11 +202,15 @@ async def chat_stream(messages: list[dict]):
             else:
                 result = json.dumps({"error": f"Tool '{tool_name}' tidak dikenal"})
 
-            full_messages.append({
+            tool_msg = {
                 "role": "tool",
                 "content": result,
                 "tool_name": tool_name,
-            })
+            }
+            full_messages.append(tool_msg)
+            # Simpan tool result ke session history
+            if session_id:
+                session_history.append(tool_msg)
 
     # Stream jawaban akhir setelah tool selesai
     payload = {
@@ -186,6 +219,7 @@ async def chat_stream(messages: list[dict]):
         "think": False,
         "stream": True,
     }
+    streamed_content = ""
     async with httpx.AsyncClient(timeout=120.0) as client:
         async with client.stream("POST", f"{OLLAMA_URL}/api/chat", json=payload) as response:
             response.raise_for_status()
@@ -195,6 +229,11 @@ async def chat_stream(messages: list[dict]):
                 chunk = json.loads(line)
                 token = chunk.get("message", {}).get("content", "")
                 if token:
+                    streamed_content += token
                     yield token
                 if chunk.get("done"):
                     break
+
+    # Simpan jawaban final assistant ke session
+    if session_id:
+        session_history.append({"role": "assistant", "content": streamed_content})
